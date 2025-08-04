@@ -7,11 +7,27 @@ class ChatApp {
         this.token = localStorage.getItem('token');
         this.contacts = [];
         this.messages = new Map();
+        
+        // Unread message tracking
+        this.unreadCounts = new Map(); // senderId -> count
+        
+        // Call-related properties
+        this.localStream = null;
+        this.remoteStream = null;
+        this.peerConnection = null;
+        this.currentCall = null;
+        this.callTimer = null;
+        this.callDuration = 0;
+        
         this.init();
     }
 
     init() {
         this.setupEventListeners();
+        
+        // Clear any existing auth data to ensure fresh login
+        this.clearAuthData();
+        
         // Always show auth modal for fresh login (no auto-login)
         this.showAuthModal();
     }
@@ -20,8 +36,21 @@ class ChatApp {
         // Auth form
         document.getElementById('authForm').addEventListener('submit', (e) => {
             e.preventDefault();
+            console.log('Form submitted!');
             this.handleAuth();
         });
+
+        // Direct login button click handler
+        const authSubmitBtn = document.getElementById('authSubmit');
+        if (authSubmitBtn) {
+            authSubmitBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                console.log('Login button clicked!');
+                this.handleAuth();
+            });
+        } else {
+            console.error('Login button not found!');
+        }
 
         // Auth switch
         document.getElementById('authSwitchLink').addEventListener('click', (e) => {
@@ -81,6 +110,32 @@ class ChatApp {
         document.getElementById('videoCallBtn').addEventListener('click', () => {
             this.initiateVideoCall();
         });
+
+        // Logout functionality
+        const logoutBtn = document.getElementById('logoutBtn');
+        if (logoutBtn) {
+            logoutBtn.addEventListener('click', () => {
+                this.logout();
+            });
+        }
+
+        // Password visibility toggle
+        const passwordToggle = document.getElementById('passwordToggle');
+        if (passwordToggle) {
+            passwordToggle.addEventListener('click', () => {
+                this.togglePasswordVisibility();
+            });
+        }
+
+        // Close message options menu when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.message-options')) {
+                const openMenus = document.querySelectorAll('.message-options-menu.show');
+                openMenus.forEach(menu => {
+                    menu.classList.remove('show');
+                });
+            }
+        });
     }
 
     showAuthModal() {
@@ -114,15 +169,27 @@ class ChatApp {
     }
 
     async handleAuth() {
+        console.log('handleAuth function called!');
+        
         const isLogin = document.getElementById('authTitle').textContent.includes('Login');
-        const email = document.getElementById('email').value;
+        const email = document.getElementById('email').value.trim();
         const password = document.getElementById('password').value;
-        const username = document.getElementById('username').value;
+        const username = document.getElementById('username').value.trim();
+
+        console.log('Login attempt:', { isLogin, email, hasPassword: !!password });
+
+        // Validate inputs
+        if (!email || !password) {
+            this.showNotification('Please fill in all required fields.', 'error');
+            return;
+        }
 
         const endpoint = isLogin ? '/api/login' : '/api/register';
         const data = isLogin ? { email, password } : { username, email, password };
 
         try {
+            console.log('Sending request to:', endpoint, 'with data:', { email, hasPassword: !!password });
+            
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: {
@@ -131,9 +198,12 @@ class ChatApp {
                 body: JSON.stringify(data)
             });
 
+            console.log('Response status:', response.status);
             const result = await response.json();
+            console.log('Response result:', result);
 
             if (response.ok) {
+                console.log('Login successful!');
                 this.token = result.token;
                 this.currentUser = result.user;
                 localStorage.setItem('token', this.token);
@@ -141,12 +211,26 @@ class ChatApp {
                 this.initializeSocket();
                 this.loadContacts();
                 this.updateUserInfo();
+                
+                // Show success notification
+                this.showNotification('ID login successfully', 'success');
             } else {
-                alert(result.error || 'Authentication failed');
+                console.log('Login failed:', result.error);
+                // If registration failed because user exists, switch to login mode and pre-fill
+                if (!isLogin && result.error && result.error.toLowerCase().includes('already exists')) {
+                    // Switch to login mode
+                    this.toggleAuthMode();
+                    // Pre-fill email and password
+                    document.getElementById('email').value = email;
+                    document.getElementById('password').value = password;
+                    this.showNotification('ID already exists. Please login.', 'error');
+                } else {
+                    this.showNotification(result.error || 'Authentication failed', 'error');
+                }
             }
         } catch (error) {
             console.error('Auth error:', error);
-            alert('Network error. Please try again.');
+            this.showNotification('Network error. Please try again.', 'error');
         }
     }
 
@@ -203,6 +287,71 @@ class ChatApp {
         this.socket.on('user-status-change', (data) => {
             this.updateUserStatus(data);
         });
+
+        // Call-related socket events
+        this.socket.on('call-offer', (data) => {
+            this.handleIncomingCall(data);
+        });
+
+        this.socket.on('call-answer', (data) => {
+            this.handleCallAnswer(data);
+        });
+
+        this.socket.on('ice-candidate', (data) => {
+            this.handleIceCandidate(data);
+        });
+
+        this.socket.on('call-end', (data) => {
+            this.showNotification('Call ended', 'info');
+            this.cleanupCall();
+            this.hideCallUI();
+        });
+
+        this.socket.on('call-reject', (data) => {
+            this.showNotification('Call rejected', 'info');
+            this.cleanupCall();
+            this.hideCallUI();
+        });
+
+        this.socket.on('load-messages', (messages) => {
+            console.log('Loading existing messages:', messages.length);
+            messages.forEach(message => {
+                this.handleNewMessage(message);
+            });
+        });
+
+        // Unread message events
+        this.socket.on('unread-counts', (unreadData) => {
+            console.log('Received unread counts:', unreadData);
+            Object.keys(unreadData).forEach(senderId => {
+                this.unreadCounts.set(senderId, unreadData[senderId]);
+            });
+            this.updateUnreadCounts();
+        });
+
+        this.socket.on('unread-count-update', (data) => {
+            console.log('Unread count update:', data);
+            this.unreadCounts.set(data.senderId, data.count);
+            this.updateUnreadCounts();
+        });
+
+        this.socket.on('messages-read-by', (data) => {
+            console.log('Messages read by:', data);
+            this.showNotification(`${data.readerName} read your messages`, 'info');
+        });
+
+        this.socket.on('message-status-update', (data) => {
+            this.updateMessageStatus(data.messageId, data.status, data.senderId);
+        });
+
+        // Message editing and deletion events
+        this.socket.on('messageDeleted', (data) => {
+            this.handleMessageDeleted(data.messageId);
+        });
+
+        this.socket.on('messageEdited', (data) => {
+            this.handleMessageEdited(data.messageId, data.newContent);
+        });
     }
 
     async loadContacts() {
@@ -235,14 +384,20 @@ class ChatApp {
     createContactElement(contact) {
         const div = document.createElement('div');
         div.className = 'contact-item';
+        div.setAttribute('data-contact-id', contact.id);
         div.onclick = () => this.selectContact(contact);
+        
+        const statusClass = contact.status === 'online' ? 'online' : 'offline';
+        const statusText = contact.status === 'online' ? 'online' : 'offline';
+        const unreadCount = this.unreadCounts.get(contact.id) || 0;
         
         div.innerHTML = `
             <img src="${contact.avatar}" alt="${contact.username}" class="avatar">
             <div class="contact-info">
                 <div class="contact-name">${contact.username}</div>
-                <div class="contact-last-message">Click to start chatting</div>
+                <div class="contact-status ${statusClass}">${statusText}</div>
             </div>
+            ${unreadCount > 0 ? `<div class="unread-badge">${unreadCount}</div>` : ''}
         `;
         
         return div;
@@ -252,10 +407,10 @@ class ChatApp {
         this.currentChat = contact;
         this.updateChatHeader(contact);
         this.clearMessages();
-        this.loadMessages(contact.id);
         
         // Join room for this chat
         const roomId = this.generateRoomId(this.currentUser.id, contact.id);
+        console.log('Joining room:', roomId, 'for chat with:', contact.username);
         this.socket.emit('join-room', roomId);
         
         // Update active contact
@@ -277,6 +432,9 @@ class ChatApp {
         if (welcomeMessage) {
             welcomeMessage.style.display = 'none';
         }
+        
+        // Load messages and mark as read when they become visible
+        this.loadMessages(contact.id);
     }
 
     generateRoomId(userId1, userId2) {
@@ -285,7 +443,9 @@ class ChatApp {
 
     updateChatHeader(contact) {
         document.getElementById('chatUserName').textContent = contact.username;
-        document.getElementById('chatUserStatus').textContent = contact.status === 'online' ? 'Online' : 'Offline';
+        const statusElement = document.getElementById('chatUserStatus');
+        statusElement.textContent = contact.status === 'online' ? 'Online' : 'Offline';
+        statusElement.className = contact.status === 'online' ? 'online' : 'offline';
         document.getElementById('chatAvatar').src = contact.avatar;
     }
 
@@ -297,18 +457,49 @@ class ChatApp {
         
         const roomId = this.generateRoomId(this.currentUser.id, this.currentChat.id);
         
+        // Handle editing existing message
+        if (this.editingMessage) {
+            this.editExistingMessage(this.editingMessage, content);
+            this.editingMessage = null;
+            input.placeholder = 'Type a message';
+            return;
+        }
+        
         const messageData = {
             content: content,
             receiverId: this.currentChat.id,
             roomId: roomId,
-            type: 'text'
+            type: 'text',
+            replyTo: this.replyingTo || null
         };
         
+        console.log('Sending message:', messageData);
         this.socket.emit('send-message', messageData);
         input.value = '';
+        
+        // Clear reply mode
+        if (this.replyingTo) {
+            this.replyingTo = null;
+            input.placeholder = 'Type a message';
+        }
     }
 
     handleNewMessage(message) {
+        console.log('Handling new message:', message);
+        
+        // Check if message already exists to prevent duplicates
+        const roomId = message.roomId;
+        if (!this.messages.has(roomId)) {
+            this.messages.set(roomId, []);
+        }
+        
+        // Check if this message already exists
+        const existingMessage = this.messages.get(roomId).find(m => m.id === message.id);
+        if (existingMessage) {
+            console.log('Message already exists, skipping:', message.id);
+            return;
+        }
+        
         // Hide welcome message if it's still showing
         const welcomeMessage = document.querySelector('.welcome-message');
         if (welcomeMessage) {
@@ -321,10 +512,6 @@ class ChatApp {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
         
         // Store message locally
-        const roomId = message.roomId;
-        if (!this.messages.has(roomId)) {
-            this.messages.set(roomId, []);
-        }
         this.messages.get(roomId).push(message);
     }
 
@@ -333,17 +520,119 @@ class ChatApp {
         const isSent = message.senderId === this.currentUser.id;
         div.className = `message ${isSent ? 'sent' : 'received'}`;
         
-        const time = new Date(message.timestamp).toLocaleTimeString('th-TH', {
-            hour: '2-digit',
-            minute: '2-digit'
+        // Convert to 12-hour format with AM/PM
+        const time = new Date(message.timestamp).toLocaleTimeString('en-US', {
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true
         });
         
-        div.innerHTML = `
-            <div class="message-bubble">
-                ${message.content}
-                <div class="message-time">${time}</div>
-            </div>
-        `;
+        let messageContent = '';
+        
+        if (message.type === 'audio') {
+            const duration = message.duration || 0;
+            const minutes = Math.floor(duration / 60);
+            const seconds = duration % 60;
+            const durationText = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            
+            messageContent = `
+                <div class="voice-message-bubble">
+                    <div class="voice-message-content">
+                        <button class="voice-play-btn" onclick="app.playVoiceMessage('${message.id}')">
+                            <i class="fas fa-play"></i>
+                        </button>
+                        <div class="voice-message-info">
+                            <div class="voice-message-duration">${durationText}</div>
+                            <div class="voice-message-waveform">
+                                <div class="waveform-bar"></div>
+                                <div class="waveform-bar"></div>
+                                <div class="waveform-bar"></div>
+                                <div class="waveform-bar"></div>
+                                <div class="waveform-bar"></div>
+                                <div class="waveform-bar"></div>
+                                <div class="waveform-bar"></div>
+                                <div class="waveform-bar"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="message-time">${time}</div>
+                    ${message.edited ? '<div class="message-edited">edited</div>' : ''}
+                    <div class="message-options">
+                        <button class="message-options-btn" onclick="app.toggleMessageOptions('${message.id}')">
+                            <i class="fas fa-ellipsis-v"></i>
+                        </button>
+                        <div class="message-options-menu" id="options-${message.id}">
+                            <button class="message-option" onclick="app.replyToMessage('${message.id}')">
+                                <i class="fas fa-reply"></i> Reply
+                            </button>
+                            ${isSent ? `
+                                <button class="message-option" onclick="app.editMessage('${message.id}')">
+                                    <i class="fas fa-edit"></i> Edit
+                                </button>
+                                <button class="message-option" onclick="app.deleteMessage('${message.id}')">
+                                    <i class="fas fa-trash"></i> Delete
+                                </button>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        } else {
+            const status = message.status || 'sent';
+            let statusText, statusClass;
+            
+            if (isSent) {
+                if (status === 'sent') {
+                    statusText = '✓';
+                    statusClass = 'sent';
+                } else if (status === 'delivered') {
+                    statusText = '✓✓';
+                    statusClass = 'delivered';
+                } else if (status === 'read') {
+                    statusText = '✓✓';
+                    statusClass = 'read';
+                } else {
+                    statusText = '✓';
+                    statusClass = 'sent';
+                }
+            }
+            
+            messageContent = `
+                <div class="message-bubble">
+                    ${message.content}
+                    <div class="message-time">${time}</div>
+                    ${isSent ? `<div class="message-status ${statusClass}">${statusText}</div>` : ''}
+                    ${message.edited ? '<div class="message-edited">edited</div>' : ''}
+                    <div class="message-options">
+                        <button class="message-options-btn" onclick="app.toggleMessageOptions('${message.id}')">
+                            <i class="fas fa-ellipsis-v"></i>
+                        </button>
+                        <div class="message-options-menu" id="options-${message.id}">
+                            <button class="message-option" onclick="app.replyToMessage('${message.id}')">
+                                <i class="fas fa-reply"></i> Reply
+                            </button>
+                            ${isSent ? `
+                                <button class="message-option" onclick="app.editMessage('${message.id}')">
+                                    <i class="fas fa-edit"></i> Edit
+                                </button>
+                                <button class="message-option" onclick="app.deleteMessage('${message.id}')">
+                                    <i class="fas fa-trash"></i> Delete
+                                </button>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        div.innerHTML = messageContent;
+        div.setAttribute('data-message-id', message.id);
+        
+        // Store audio data for playback
+        if (message.type === 'audio' && message.audio) {
+            div.setAttribute('data-audio', message.audio);
+            console.log('Audio message created with ID:', message.id, 'Duration:', message.duration);
+        }
         
         return div;
     }
@@ -385,6 +674,9 @@ class ChatApp {
                 const messageElement = this.createMessageElement(message);
                 document.getElementById('messagesContainer').appendChild(messageElement);
             });
+            
+            // Mark messages as read when they become visible
+            this.markMessagesAsRead(contactId);
         }
     }
 
@@ -406,7 +698,17 @@ class ChatApp {
         const contactItems = document.querySelectorAll('.contact-item');
         contactItems.forEach(item => {
             const contactName = item.querySelector('.contact-name').textContent;
-            // Find the contact and update status (you'd need to match by ID in a real app)
+            const statusElement = item.querySelector('.contact-status');
+            
+            // Find the contact by name and update status
+            const contact = this.contacts.find(c => c.username === contactName);
+            if (contact && contact.id === data.userId) {
+                contact.status = data.status;
+                if (statusElement) {
+                    statusElement.className = `contact-status ${data.status}`;
+                    statusElement.textContent = data.status;
+                }
+            }
         });
     }
 
@@ -518,24 +820,34 @@ class ChatApp {
 
     startVoiceRecording() {
         if (!navigator.mediaDevices || !window.MediaRecorder) {
-            alert('Voice recording not supported in this browser.');
+            this.showNotification('Voice recording not supported in this browser.', 'error');
             return;
         }
+        
+        if (!this.currentChat) {
+            this.showNotification('Select a chat to send voice message.', 'error');
+            return;
+        }
+
         navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
             this.mediaRecorder = new MediaRecorder(stream);
             this.audioChunks = [];
+            this.recordingStartTime = Date.now();
+            
             this.mediaRecorder.ondataavailable = e => {
                 if (e.data.size > 0) this.audioChunks.push(e.data);
             };
+            
             this.mediaRecorder.onstop = () => {
                 const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
                 this.sendVoiceMessage(audioBlob);
             };
+            
             this.mediaRecorder.start();
             this.isRecording = true;
-            this.showRecordingIndicator();
+            this.showVoiceRecordingUI();
         }).catch(() => {
-            alert('Microphone access denied.');
+            this.showNotification('Microphone access denied.', 'error');
         });
     }
 
@@ -543,126 +855,891 @@ class ChatApp {
         if (this.mediaRecorder && this.isRecording) {
             this.mediaRecorder.stop();
             this.isRecording = false;
-            this.hideRecordingIndicator();
+            this.hideVoiceRecordingUI();
+            
+            // Stop all tracks
+            if (this.mediaRecorder.stream) {
+                this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
+            }
         }
     }
 
-    showRecordingIndicator() {
-        let indicator = document.getElementById('recordingIndicator');
-        if (!indicator) {
-            indicator = document.createElement('div');
-            indicator.id = 'recordingIndicator';
-            indicator.textContent = 'Recording... Click mic again to stop.';
-            indicator.style.position = 'fixed';
-            indicator.style.bottom = '120px';
-            indicator.style.left = '50%';
-            indicator.style.transform = 'translateX(-50%)';
-            indicator.style.background = '#d32f2f';
-            indicator.style.color = '#fff';
-            indicator.style.padding = '10px 20px';
-            indicator.style.borderRadius = '8px';
-            indicator.style.zIndex = 3000;
-            document.body.appendChild(indicator);
-        } else {
-            indicator.style.display = 'block';
+    showVoiceRecordingUI() {
+        let recordingUI = document.getElementById('voiceRecordingUI');
+        if (!recordingUI) {
+            recordingUI = document.createElement('div');
+            recordingUI.id = 'voiceRecordingUI';
+            recordingUI.className = 'voice-recording-ui';
+            document.body.appendChild(recordingUI);
+        }
+
+        recordingUI.innerHTML = `
+            <div class="voice-recording-container">
+                <div class="recording-header">
+                    <i class="fas fa-microphone recording-icon"></i>
+                    <span class="recording-text">Recording voice message...</span>
+                </div>
+                <div class="recording-timer" id="recordingTimer">00:00</div>
+                <div class="recording-controls">
+                    <button class="recording-btn cancel-btn" id="cancelRecording">
+                        <i class="fas fa-times"></i>
+                    </button>
+                    <button class="recording-btn send-btn" id="sendRecording">
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+            </div>
+        `;
+
+        // Add event listeners
+        recordingUI.querySelector('#cancelRecording').addEventListener('click', () => {
+            this.cancelVoiceRecording();
+        });
+        
+        recordingUI.querySelector('#sendRecording').addEventListener('click', () => {
+            this.stopVoiceRecording();
+        });
+
+        recordingUI.style.display = 'flex';
+        this.startRecordingTimer();
+    }
+
+    hideVoiceRecordingUI() {
+        const recordingUI = document.getElementById('voiceRecordingUI');
+        if (recordingUI) {
+            recordingUI.style.display = 'none';
+        }
+        this.stopRecordingTimer();
+    }
+
+    cancelVoiceRecording() {
+        if (this.mediaRecorder && this.isRecording) {
+            this.mediaRecorder.stop();
+            this.isRecording = false;
+            this.hideVoiceRecordingUI();
+            
+            // Stop all tracks
+            if (this.mediaRecorder.stream) {
+                this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
+            }
         }
     }
-    hideRecordingIndicator() {
-        const indicator = document.getElementById('recordingIndicator');
-        if (indicator) indicator.style.display = 'none';
+
+    startRecordingTimer() {
+        this.recordingTimer = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - this.recordingStartTime) / 1000);
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+            const timerElement = document.getElementById('recordingTimer');
+            if (timerElement) {
+                timerElement.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            }
+        }, 1000);
     }
+
+    stopRecordingTimer() {
+        if (this.recordingTimer) {
+            clearInterval(this.recordingTimer);
+            this.recordingTimer = null;
+        }
+    }
+    
     sendVoiceMessage(audioBlob) {
         if (!this.currentChat) return;
         const roomId = this.generateRoomId(this.currentUser.id, this.currentChat.id);
         const reader = new FileReader();
         reader.onload = () => {
             const base64Audio = reader.result;
+            const duration = Math.floor((Date.now() - this.recordingStartTime) / 1000);
             const messageData = {
                 content: '',
                 receiverId: this.currentChat.id,
                 roomId: roomId,
                 type: 'audio',
-                audio: base64Audio
+                audio: base64Audio,
+                duration: duration
             };
+            console.log('Sending voice message with duration:', duration);
             this.socket.emit('send-message', messageData);
         };
         reader.readAsDataURL(audioBlob);
     }
 
-    // --- VOICE/VIDEO CALL ---
-    initiateVoiceCall() {
-        this.startCall(false);
-    }
-    initiateVideoCall() {
-        this.startCall(true);
-    }
-    startCall(isVideo) {
-        if (!navigator.mediaDevices || !window.RTCPeerConnection) {
-            alert('WebRTC not supported in this browser.');
-            return;
-        }
+    // --- CALL SYSTEM ---
+    async initiateVoiceCall() {
         if (!this.currentChat) {
-            alert('Select a chat to start a call.');
+            this.showNotification('Select a chat to start a call', 'error');
             return;
         }
-        // Minimal peer-to-peer setup (no signaling server, demo only)
-        alert('This is a demo: Real call requires signaling server. UI overlay will show.');
-        this.showCallOverlay(isVideo);
+        await this.startCall(false);
     }
-    showCallOverlay(isVideo) {
-        let overlay = document.getElementById('callOverlay');
-        if (!overlay) {
-            overlay = document.createElement('div');
-            overlay.id = 'callOverlay';
-            overlay.style.position = 'fixed';
-            overlay.style.top = 0;
-            overlay.style.left = 0;
-            overlay.style.width = '100vw';
-            overlay.style.height = '100vh';
-            overlay.style.background = 'rgba(0,0,0,0.85)';
-            overlay.style.display = 'flex';
-            overlay.style.flexDirection = 'column';
-            overlay.style.alignItems = 'center';
-            overlay.style.justifyContent = 'center';
-            overlay.style.zIndex = 4000;
-            const video = document.createElement('video');
-            video.autoplay = true;
-            video.muted = true;
-            video.style.width = '320px';
-            video.style.height = '240px';
-            video.style.background = '#222';
-            video.style.borderRadius = '12px';
-            video.style.marginBottom = '20px';
-            overlay.appendChild(video);
-            const text = document.createElement('div');
-            text.textContent = isVideo ? 'Video Call (Demo)' : 'Voice Call (Demo)';
-            text.style.color = '#fff';
-            text.style.fontSize = '22px';
-            text.style.marginBottom = '20px';
-            overlay.appendChild(text);
-            const endBtn = document.createElement('button');
-            endBtn.textContent = 'End Call';
-            endBtn.style.padding = '10px 30px';
-            endBtn.style.fontSize = '18px';
-            endBtn.style.background = '#d32f2f';
-            endBtn.style.color = '#fff';
-            endBtn.style.border = 'none';
-            endBtn.style.borderRadius = '8px';
-            endBtn.style.cursor = 'pointer';
-            endBtn.onclick = () => {
-                if (video.srcObject) {
-                    video.srcObject.getTracks().forEach(track => track.stop());
-                }
-                overlay.remove();
-            };
-            overlay.appendChild(endBtn);
-            document.body.appendChild(overlay);
+
+    async initiateVideoCall() {
+        if (!this.currentChat) {
+            this.showNotification('Select a chat to start a call', 'error');
+            return;
+        }
+        await this.startCall(true);
+    }
+
+    async startCall(isVideo) {
+        try {
             // Get user media
-            navigator.mediaDevices.getUserMedia({ audio: true, video: isVideo }).then(stream => {
-                video.srcObject = stream;
+            this.localStream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+                video: isVideo
+            });
+
+            // Create peer connection
+            this.peerConnection = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            });
+
+            // Add local stream to peer connection
+            this.localStream.getTracks().forEach(track => {
+                this.peerConnection.addTrack(track, this.localStream);
+            });
+
+            // Handle remote stream
+            this.peerConnection.ontrack = (event) => {
+                this.remoteStream = event.streams[0];
+                this.updateCallUI();
+            };
+
+            // Handle ICE candidates
+            this.peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    this.socket.emit('ice-candidate', {
+                        to: this.currentChat.id,
+                        candidate: event.candidate,
+                        from: this.currentUser.id
+                    });
+                }
+            };
+
+            // Create and send offer
+            const offer = await this.peerConnection.createOffer();
+            await this.peerConnection.setLocalDescription(offer);
+
+            this.currentCall = {
+                type: isVideo ? 'video' : 'voice',
+                with: this.currentChat,
+                isInitiator: true,
+                status: 'calling'
+            };
+
+            this.socket.emit('call-offer', {
+                to: this.currentChat.id,
+                offer: offer,
+                from: this.currentUser.id,
+                isVideo: isVideo
+            });
+
+            this.showCallUI();
+            this.startCallTimer();
+
+        } catch (error) {
+            console.error('Error starting call:', error);
+            this.showNotification('Failed to start call. Please check your camera/microphone permissions.', 'error');
+        }
+    }
+
+    handleIncomingCall(data) {
+        this.currentCall = {
+            type: data.isVideo ? 'video' : 'voice',
+            with: this.contacts.find(c => c.id === data.from),
+            isInitiator: false,
+            status: 'incoming',
+            offer: data.offer
+        };
+
+        this.showIncomingCallUI();
+    }
+
+    async acceptCall() {
+        try {
+            // Get user media
+            this.localStream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+                video: this.currentCall.type === 'video'
+            });
+
+            // Create peer connection
+            this.peerConnection = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            });
+
+            // Add local stream to peer connection
+            this.localStream.getTracks().forEach(track => {
+                this.peerConnection.addTrack(track, this.localStream);
+            });
+
+            // Handle remote stream
+            this.peerConnection.ontrack = (event) => {
+                this.remoteStream = event.streams[0];
+                this.updateCallUI();
+            };
+
+            // Handle ICE candidates
+            this.peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    this.socket.emit('ice-candidate', {
+                        to: this.currentCall.with.id,
+                        candidate: event.candidate,
+                        from: this.currentUser.id
+                    });
+                }
+            };
+
+            // Set remote description and create answer
+            await this.peerConnection.setRemoteDescription(this.currentCall.offer);
+            const answer = await this.peerConnection.createAnswer();
+            await this.peerConnection.setLocalDescription(answer);
+
+            // Send answer
+            this.socket.emit('call-answer', {
+                to: this.currentCall.with.id,
+                answer: answer,
+                from: this.currentUser.id
+            });
+
+            this.currentCall.status = 'connected';
+            this.showCallUI();
+            this.startCallTimer();
+
+        } catch (error) {
+            console.error('Error accepting call:', error);
+            this.showNotification('Failed to accept call', 'error');
+            this.endCall();
+        }
+    }
+
+    async handleCallAnswer(data) {
+        if (this.peerConnection && this.currentCall) {
+            await this.peerConnection.setRemoteDescription(data.answer);
+            this.currentCall.status = 'connected';
+            this.updateCallUI();
+        }
+    }
+
+    async handleIceCandidate(data) {
+        if (this.peerConnection) {
+            await this.peerConnection.addIceCandidate(data.candidate);
+        }
+    }
+
+    endCall() {
+        if (this.currentCall) {
+            this.socket.emit('call-end', {
+                to: this.currentCall.with.id,
+                from: this.currentUser.id
+            });
+        }
+
+        this.cleanupCall();
+        this.hideCallUI();
+    }
+
+    rejectCall() {
+        if (this.currentCall) {
+            this.socket.emit('call-reject', {
+                to: this.currentCall.with.id,
+                from: this.currentUser.id
+            });
+        }
+
+        this.currentCall = null;
+        this.hideCallUI();
+    }
+
+    cleanupCall() {
+        if (this.localStream) {
+            this.localStream.getTracks().forEach(track => track.stop());
+            this.localStream = null;
+        }
+
+        if (this.peerConnection) {
+            this.peerConnection.close();
+            this.peerConnection = null;
+        }
+
+        this.remoteStream = null;
+        this.currentCall = null;
+        this.stopCallTimer();
+    }
+
+    startCallTimer() {
+        this.callDuration = 0;
+        this.callTimer = setInterval(() => {
+            this.callDuration++;
+            this.updateCallTimer();
+        }, 1000);
+    }
+
+    stopCallTimer() {
+        if (this.callTimer) {
+            clearInterval(this.callTimer);
+            this.callTimer = null;
+        }
+    }
+
+    updateCallTimer() {
+        const timerElement = document.getElementById('callTimer');
+        if (timerElement) {
+            const minutes = Math.floor(this.callDuration / 60);
+            const seconds = this.callDuration % 60;
+            timerElement.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        }
+    }
+
+    showCallUI() {
+        let callUI = document.getElementById('callUI');
+        if (!callUI) {
+            callUI = this.createCallUI();
+            document.body.appendChild(callUI);
+        }
+
+        callUI.style.display = 'flex';
+        this.updateCallUI();
+    }
+
+    showIncomingCallUI() {
+        let incomingCallUI = document.getElementById('incomingCallUI');
+        if (!incomingCallUI) {
+            incomingCallUI = this.createIncomingCallUI();
+            document.body.appendChild(incomingCallUI);
+        }
+
+        incomingCallUI.style.display = 'flex';
+    }
+
+    hideCallUI() {
+        const callUI = document.getElementById('callUI');
+        const incomingCallUI = document.getElementById('incomingCallUI');
+        
+        if (callUI) callUI.style.display = 'none';
+        if (incomingCallUI) incomingCallUI.style.display = 'none';
+    }
+
+    updateCallUI() {
+        const localVideo = document.getElementById('localVideo');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const callType = document.getElementById('callType');
+        const callStatus = document.getElementById('callStatus');
+
+        if (localVideo && this.localStream) {
+            localVideo.srcObject = this.localStream;
+        }
+
+        if (remoteVideo && this.remoteStream) {
+            remoteVideo.srcObject = this.remoteStream;
+        }
+
+        if (callType) {
+            callType.textContent = this.currentCall.type === 'video' ? 'Video Call' : 'Voice Call';
+        }
+
+        if (callStatus) {
+            callStatus.textContent = this.currentCall.status === 'connected' ? 'Connected' : 'Connecting...';
+        }
+    }
+
+    createCallUI() {
+        const callUI = document.createElement('div');
+        callUI.id = 'callUI';
+        callUI.className = 'call-ui';
+        
+        callUI.innerHTML = `
+            <div class="call-container">
+                <div class="call-header">
+                    <div class="call-info">
+                        <h3 id="callType">${this.currentCall.type === 'video' ? 'Video Call' : 'Voice Call'}</h3>
+                        <p id="callStatus">Connecting...</p>
+                        <p id="callTimer">00:00</p>
+                    </div>
+                </div>
+                
+                <div class="call-video-container">
+                    <video id="remoteVideo" autoplay playsinline class="remote-video"></video>
+                    <video id="localVideo" autoplay playsinline muted class="local-video"></video>
+                </div>
+                
+                <div class="call-controls">
+                    <button class="call-btn mute-btn" id="muteBtn">
+                        <i class="fas fa-microphone"></i>
+                    </button>
+                    <button class="call-btn camera-btn" id="cameraBtn" style="display: ${this.currentCall.type === 'video' ? 'block' : 'none'}">
+                        <i class="fas fa-video"></i>
+                    </button>
+                    <button class="call-btn end-call-btn" id="endCallBtn">
+                        <i class="fas fa-phone-slash"></i>
+                    </button>
+                </div>
+            </div>
+        `;
+
+        // Add event listeners
+        callUI.querySelector('#endCallBtn').addEventListener('click', () => this.endCall());
+        callUI.querySelector('#muteBtn').addEventListener('click', () => this.toggleMute());
+        callUI.querySelector('#cameraBtn').addEventListener('click', () => this.toggleCamera());
+
+        return callUI;
+    }
+
+    createIncomingCallUI() {
+        const incomingCallUI = document.createElement('div');
+        incomingCallUI.id = 'incomingCallUI';
+        incomingCallUI.className = 'incoming-call-ui';
+        
+        incomingCallUI.innerHTML = `
+            <div class="incoming-call-container">
+                <div class="caller-info">
+                    <img src="${this.currentCall.with.avatar}" alt="${this.currentCall.with.username}" class="caller-avatar">
+                    <h3>${this.currentCall.with.username}</h3>
+                    <p>${this.currentCall.type === 'video' ? 'Incoming video call' : 'Incoming voice call'}</p>
+                </div>
+                
+                <div class="incoming-call-controls">
+                    <button class="call-btn accept-btn" id="acceptCallBtn">
+                        <i class="fas fa-phone"></i>
+                    </button>
+                    <button class="call-btn reject-btn" id="rejectCallBtn">
+                        <i class="fas fa-phone-slash"></i>
+                    </button>
+                </div>
+            </div>
+        `;
+
+        // Add event listeners
+        incomingCallUI.querySelector('#acceptCallBtn').addEventListener('click', () => this.acceptCall());
+        incomingCallUI.querySelector('#rejectCallBtn').addEventListener('click', () => this.rejectCall());
+
+        return incomingCallUI;
+    }
+
+    toggleMute() {
+        if (this.localStream) {
+            const audioTrack = this.localStream.getAudioTracks()[0];
+            if (audioTrack) {
+                audioTrack.enabled = !audioTrack.enabled;
+                const muteBtn = document.getElementById('muteBtn');
+                if (muteBtn) {
+                    muteBtn.classList.toggle('active');
+                }
+            }
+        }
+    }
+
+    toggleCamera() {
+        if (this.localStream) {
+            const videoTrack = this.localStream.getVideoTracks()[0];
+            if (videoTrack) {
+                videoTrack.enabled = !videoTrack.enabled;
+                const cameraBtn = document.getElementById('cameraBtn');
+                if (cameraBtn) {
+                    cameraBtn.classList.toggle('active');
+                }
+            }
+        }
+    }
+
+    showNotification(message, type = 'info') {
+        const notification = document.createElement('div');
+        notification.className = `notification ${type}`;
+        notification.textContent = message;
+        
+        document.body.appendChild(notification);
+        
+        setTimeout(() => {
+            notification.remove();
+        }, 3000);
+    }
+
+    updateUnreadCounts() {
+        this.contacts.forEach(contact => {
+            const contactElement = document.querySelector(`[data-contact-id="${contact.id}"]`);
+            if (contactElement) {
+                const unreadCount = this.unreadCounts.get(contact.id) || 0;
+                let unreadBadge = contactElement.querySelector('.unread-badge');
+                
+                if (unreadCount > 0) {
+                    if (!unreadBadge) {
+                        unreadBadge = document.createElement('div');
+                        unreadBadge.className = 'unread-badge';
+                        contactElement.appendChild(unreadBadge);
+                    }
+                    unreadBadge.textContent = unreadCount;
+                } else if (unreadBadge) {
+                    unreadBadge.remove();
+                }
+            }
+        });
+    }
+
+    updateMessageStatus(messageId, status, senderId = null) {
+        if (messageId === 'all' && senderId) {
+            // Update all messages from this sender
+            const messageElements = document.querySelectorAll('.message');
+            messageElements.forEach(element => {
+                const isSent = element.classList.contains('sent');
+                if (isSent) {
+                    const statusElement = element.querySelector('.message-status');
+                    if (statusElement) {
+                        statusElement.textContent = '✓✓';
+                        statusElement.className = 'message-status read';
+                    }
+                }
             });
         } else {
-            overlay.style.display = 'flex';
+            const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
+            if (messageElement) {
+                const statusElement = messageElement.querySelector('.message-status');
+                if (statusElement) {
+                    if (status === 'sent') {
+                        statusElement.textContent = '✓';
+                        statusElement.className = 'message-status sent';
+                    } else if (status === 'delivered') {
+                        statusElement.textContent = '✓✓';
+                        statusElement.className = 'message-status delivered';
+                    } else if (status === 'read') {
+                        statusElement.textContent = '✓✓';
+                        statusElement.className = 'message-status read';
+                    }
+                }
+            }
+        }
+    }
+
+    markMessagesAsRead(contactId) {
+        if (this.unreadCounts.has(contactId)) {
+            this.unreadCounts.delete(contactId);
+            this.updateUnreadCounts();
+            
+            // Notify server that messages have been read
+            this.socket.emit('mark-messages-read', { senderId: contactId });
+        }
+    }
+
+    togglePasswordVisibility() {
+        const passwordInput = document.getElementById('password');
+        const passwordToggle = document.getElementById('passwordToggle');
+        const icon = passwordToggle.querySelector('i');
+        
+        if (passwordInput.type === 'password') {
+            passwordInput.type = 'text';
+            icon.className = 'fas fa-eye-slash';
+            passwordToggle.classList.add('active');
+        } else {
+            passwordInput.type = 'password';
+            icon.className = 'fas fa-eye';
+            passwordToggle.classList.remove('active');
+        }
+    }
+
+    playVoiceMessage(messageId) {
+        const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
+        if (!messageElement) {
+            console.error('Message element not found for ID:', messageId);
+            return;
+        }
+        
+        const audioData = messageElement.getAttribute('data-audio');
+        if (!audioData) {
+            console.error('No audio data found for message:', messageId);
+            return;
+        }
+        
+        // Create audio element
+        const audio = new Audio(audioData);
+        const playBtn = messageElement.querySelector('.voice-play-btn i');
+        
+        if (!playBtn) {
+            console.error('Play button not found');
+            return;
+        }
+        
+        // Update button to show playing state
+        playBtn.className = 'fas fa-pause';
+        
+        audio.addEventListener('ended', () => {
+            playBtn.className = 'fas fa-play';
+        });
+        
+        audio.addEventListener('error', (error) => {
+            console.error('Audio playback error:', error);
+            playBtn.className = 'fas fa-play';
+            this.showNotification('Error playing voice message', 'error');
+        });
+        
+        // Play the audio
+        audio.play().catch(error => {
+            console.error('Error playing audio:', error);
+            playBtn.className = 'fas fa-play';
+            this.showNotification('Error playing voice message', 'error');
+        });
+    }
+
+    logout() {
+        // Clear token and user data
+        localStorage.removeItem('token');
+        this.token = null;
+        this.currentUser = null;
+        
+        // Disconnect socket
+        if (this.socket) {
+            this.socket.disconnect();
+            this.socket = null;
+        }
+        
+        // Clear UI
+        this.clearMessages();
+        this.contacts = [];
+        this.renderContacts();
+        
+        // Show auth modal
+        this.showAuthModal();
+        
+        this.showNotification('Logged out successfully', 'info');
+    }
+
+    clearAuthData() {
+        // Clear all authentication data
+        localStorage.removeItem('token');
+        this.token = null;
+        this.currentUser = null;
+        
+        // Disconnect socket
+        if (this.socket) {
+            this.socket.disconnect();
+            this.socket = null;
+        }
+    }
+
+    // Message options functionality
+    toggleMessageOptions(messageId) {
+        // Close all other open menus first
+        const allMenus = document.querySelectorAll('.message-options-menu.show');
+        allMenus.forEach(menu => {
+            if (menu.id !== `options-${messageId}`) {
+                menu.classList.remove('show');
+            }
+        });
+
+        const menu = document.getElementById(`options-${messageId}`);
+        if (menu) {
+            menu.classList.toggle('show');
+        }
+    }
+
+    replyToMessage(messageId) {
+        const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
+        if (!messageElement) return;
+
+        const messageBubble = messageElement.querySelector('.message-bubble');
+        if (!messageBubble) return;
+
+        // Extract only the text content, excluding time, status, and edited indicators
+        let messageContent = '';
+        const textNodes = messageBubble.childNodes;
+        for (const node of textNodes) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                messageContent += node.textContent;
+            }
+        }
+        messageContent = messageContent.trim();
+
+        const messageInput = document.getElementById('messageInput');
+        
+        // Add reply indicator
+        messageInput.placeholder = `Reply to: ${messageContent.substring(0, 50)}${messageContent.length > 50 ? '...' : ''}`;
+        messageInput.focus();
+        
+        // Store the message being replied to
+        this.replyingTo = messageId;
+        
+        // Close the menu
+        this.toggleMessageOptions(messageId);
+        
+        this.showNotification('Reply mode activated', 'info');
+    }
+
+    editMessage(messageId) {
+        const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
+        if (!messageElement) return;
+
+        const messageBubble = messageElement.querySelector('.message-bubble');
+        if (!messageBubble) return;
+
+        // Extract only the text content, excluding time, status, and edited indicators
+        let messageContent = '';
+        const textNodes = messageBubble.childNodes;
+        for (const node of textNodes) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                messageContent += node.textContent;
+            }
+        }
+        messageContent = messageContent.trim();
+
+        const messageInput = document.getElementById('messageInput');
+        
+        // Set the input value to the current message content
+        messageInput.value = messageContent;
+        messageInput.focus();
+        
+        // Store the message being edited
+        this.editingMessage = messageId;
+        
+        // Close the menu
+        this.toggleMessageOptions(messageId);
+        
+        this.showNotification('Edit mode activated', 'info');
+    }
+
+    async deleteMessage(messageId) {
+        if (!this.currentChat) return;
+
+        try {
+            const response = await fetch(`/api/messages/${messageId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': `Bearer ${this.token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            if (response.ok) {
+                // Remove message from UI
+                const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
+                if (messageElement) {
+                    messageElement.remove();
+                }
+
+                // Show delete notification
+                this.showDeleteNotification();
+                
+                // Emit delete event to other users
+                const roomId = this.generateRoomId(this.currentUser.id, this.currentChat.id);
+                this.socket.emit('messageDeleted', { messageId, roomId });
+                
+                // Close the menu
+                this.toggleMessageOptions(messageId);
+            } else {
+                this.showNotification('Failed to delete message', 'error');
+            }
+        } catch (error) {
+            console.error('Error deleting message:', error);
+            this.showNotification('Error deleting message', 'error');
+        }
+    }
+
+    showDeleteNotification() {
+        const notification = document.createElement('div');
+        notification.className = 'delete-notification';
+        notification.textContent = 'Message deleted';
+        document.body.appendChild(notification);
+
+        // Remove after 2 seconds
+        setTimeout(() => {
+            if (notification.parentNode) {
+                notification.parentNode.removeChild(notification);
+            }
+        }, 2000);
+    }
+
+    // Handle message deletion from other users
+    handleMessageDeleted(messageId) {
+        const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
+        if (messageElement) {
+            messageElement.remove();
+            this.showDeleteNotification();
+        }
+    }
+
+    // Handle message editing from other users
+    handleMessageEdited(messageId, newContent) {
+        const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
+        if (messageElement) {
+            const contentElement = messageElement.querySelector('.message-bubble');
+            if (contentElement) {
+                // Update the content while preserving time and status
+                const timeElement = contentElement.querySelector('.message-time');
+                const statusElement = contentElement.querySelector('.message-status');
+                const editedElement = contentElement.querySelector('.message-edited');
+                
+                contentElement.innerHTML = newContent;
+                
+                // Restore time and status
+                if (timeElement) contentElement.appendChild(timeElement);
+                if (statusElement) contentElement.appendChild(statusElement);
+                if (editedElement) contentElement.appendChild(editedElement);
+                
+                // Add edited indicator if not present
+                if (!editedElement) {
+                    const newEditedElement = document.createElement('div');
+                    newEditedElement.className = 'message-edited';
+                    newEditedElement.textContent = 'edited';
+                    contentElement.appendChild(newEditedElement);
+                }
+            }
+        }
+    }
+
+    async editExistingMessage(messageId, newContent) {
+        if (!this.currentChat) return;
+
+        try {
+            const response = await fetch(`/api/messages/${messageId}`, {
+                method: 'PUT',
+                headers: {
+                    'Authorization': `Bearer ${this.token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ content: newContent })
+            });
+
+            if (response.ok) {
+                // Update message in UI
+                const messageElement = document.querySelector(`[data-message-id="${messageId}"]`);
+                if (messageElement) {
+                    const contentElement = messageElement.querySelector('.message-bubble');
+                    if (contentElement) {
+                        // Update the content while preserving time and status
+                        const timeElement = contentElement.querySelector('.message-time');
+                        const statusElement = contentElement.querySelector('.message-status');
+                        const optionsElement = contentElement.querySelector('.message-options');
+                        
+                        contentElement.innerHTML = newContent;
+                        
+                        // Restore time, status, and options
+                        if (timeElement) contentElement.appendChild(timeElement);
+                        if (statusElement) contentElement.appendChild(statusElement);
+                        if (optionsElement) contentElement.appendChild(optionsElement);
+                        
+                        // Add edited indicator
+                        const editedElement = document.createElement('div');
+                        editedElement.className = 'message-edited';
+                        editedElement.textContent = 'edited';
+                        contentElement.appendChild(editedElement);
+                    }
+                }
+
+                // Emit edit event to other users
+                const roomId = this.generateRoomId(this.currentUser.id, this.currentChat.id);
+                this.socket.emit('messageEdited', { messageId, newContent, roomId });
+                
+                this.showNotification('Message edited successfully', 'success');
+            } else {
+                this.showNotification('Failed to edit message', 'error');
+            }
+        } catch (error) {
+            console.error('Error editing message:', error);
+            this.showNotification('Error editing message', 'error');
         }
     }
 }

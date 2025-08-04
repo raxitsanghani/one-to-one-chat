@@ -1,0 +1,22 @@
+[
+  {
+    "id": "4a8740e1-6ac8-4136-8709-28323abe33f0",
+    "username": "Raxit",
+    "email": "raxitsanghani@gmail.com",
+    "password": "$2a$10$Q5GuWFYiF/5njPN4HyywEeccoZeiBcVR0PIEJZc/uhT/0xnYQG8li",
+    "avatar": "/images/default-avatar.png",
+    "status": "offline",
+    "lastSeen": "2025-08-01T12:10:11.772Z",
+    "createdAt": "2025-08-01T07:17:21.155Z"
+  },
+  {
+    "id": "d1c57372-6d74-4c02-bcd0-da26b46a6182",
+    "username": "meet",
+    "email": "raxit@gmail.com",
+    "password": "$2a$10$eJtniwXSgIQKZCy8i9lqqOQyQziI6iKTAiImqPvlWlpWSnvlfzD1y",
+    "avatar": "/images/default-avatar.png",
+    "status": "online",
+    "lastSeen": "2025-08-01T11:38:49.089Z",
+    "createdAt": "2025-08-01T07:18:07.342Z"
+  }
+]
