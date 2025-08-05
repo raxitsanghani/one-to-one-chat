@@ -833,6 +833,18 @@
       "timestamp": "2025-08-01T11:38:56.027Z",
       "status": "delivered",
       "replyTo": null
+    },
+    {
+      "id": "20c436c0-8d72-4117-99a7-231ddf8e7240",
+      "senderId": "4a8740e1-6ac8-4136-8709-28323abe33f0",
+      "senderName": "Raxit",
+      "receiverId": "d1c57372-6d74-4c02-bcd0-da26b46a6182",
+      "roomId": "4a8740e1-6ac8-4136-8709-28323abe33f0-d1c57372-6d74-4c02-bcd0-da26b46a6182",
+      "content": "jh78frgyfirjkff",
+      "type": "text",
+      "timestamp": "2025-08-05T09:41:43.780Z",
+      "status": "delivered",
+      "replyTo": null
     }
   ]
 }
